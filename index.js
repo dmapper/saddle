@@ -8,28 +8,37 @@ if (typeof require === 'function') {
 // https://github.com/jquery/jquery/blob/1.x-master/src/attributes/prop.js
 // https://github.com/jquery/jquery/blob/master/src/attributes/prop.js
 // http://webbugtrack.blogspot.com/2007/08/bug-242-setattribute-doesnt-always-work.html
-var UPDATE_PROPERTIES = {
+var BOOLEAN_PROPERTIES = {
   checked: 'checked'
 , disabled: 'disabled'
-, selected: 'selected'
-, type: 'type'
-, value: 'value'
-, 'class': 'className'
-, 'for': 'htmlFor'
-, tabindex: 'tabIndex'
 , readonly: 'readOnly'
+, selected: 'selected'
+};
+var INTEGER_PROPERTIES = {
+  colspan: 'colSpan'
 , maxlength: 'maxLength'
-, cellspacing: 'cellSpacing'
-, cellpadding: 'cellPadding'
 , rowspan: 'rowSpan'
-, colspan: 'colSpan'
-, usemap: 'useMap'
-, frameborder: 'frameBorder'
+, tabindex: 'tabIndex'
+};
+var STRING_PROPERTIES = {
+  cellpadding: 'cellPadding'
+, cellspacing: 'cellSpacing'
+, 'class': 'className'
 , contenteditable: 'contentEditable'
 , enctype: 'encoding'
+, 'for': 'htmlFor'
+, frameborder: 'frameBorder'
 , id: 'id'
 , title: 'title'
+, type: 'type'
+, usemap: 'useMap'
+, value: 'value'
 };
+var UPDATE_PROPERTIES = {};
+mergeInto(BOOLEAN_PROPERTIES, UPDATE_PROPERTIES);
+mergeInto(INTEGER_PROPERTIES, UPDATE_PROPERTIES);
+mergeInto(STRING_PROPERTIES, UPDATE_PROPERTIES);
+
 // CREATE_PROPERTIES map HTML attribute names to an Element DOM property that
 // should be used for setting on Element rendering instead of setAttribute.
 // input.defaultChecked and input.defaultValue affect the attribute, so we want
@@ -67,6 +76,9 @@ var NAMESPACE_URIS = {
 };
 
 exports.CREATE_PROPERTIES = CREATE_PROPERTIES;
+exports.BOOLEAN_PROPERTIES = BOOLEAN_PROPERTIES;
+exports.INTEGER_PROPERTIES = INTEGER_PROPERTIES;
+exports.STRING_PROPERTIES = STRING_PROPERTIES;
 exports.UPDATE_PROPERTIES = UPDATE_PROPERTIES;
 exports.VOID_ELEMENTS = VOID_ELEMENTS;
 exports.NAMESPACE_URIS = NAMESPACE_URIS;
@@ -125,6 +137,9 @@ Template.prototype.update = function() {};
 Template.prototype.stringify = function(value) {
   return (value == null) ? '' : value + '';
 };
+Template.prototype.equals = function(other) {
+  return this === other;
+};
 Template.prototype.module = 'templates';
 Template.prototype.type = 'Template';
 Template.prototype.serialize = function() {
@@ -137,7 +152,8 @@ function Doctype(name, publicId, systemId) {
   this.publicId = publicId;
   this.systemId = systemId;
 }
-Doctype.prototype = new Template();
+Doctype.prototype = Object.create(Template.prototype);
+Doctype.prototype.constructor = Doctype;
 Doctype.prototype.get = function() {
   var publicText = (this.publicId) ?
     ' PUBLIC "' + this.publicId  + '"' :
@@ -170,7 +186,8 @@ function Text(data) {
   this.data = data;
   this.escaped = escapeHtml(data);
 }
-Text.prototype = new Template();
+Text.prototype = Object.create(Template.prototype);
+Text.prototype.constructor = Text;
 Text.prototype.get = function(context, unescaped) {
   return (unescaped) ? this.data : this.escaped;
 };
@@ -186,11 +203,19 @@ Text.prototype.serialize = function() {
   return serializeObject.instance(this, this.data);
 };
 
+// DynamicText might be more accurately named DynamicContent. When its
+// expression returns a template, it acts similar to a Block, and it renders
+// the template surrounded by comment markers for range replacement. When its
+// expression returns any other type, it renders a DOM Text node with no
+// markers. Text nodes are bound by updating their data property dynamically.
+// The update method must take care to switch between these types of bindings
+// in case the expression return type changes dynamically.
 function DynamicText(expression) {
   this.expression = expression;
   this.unbound = false;
 }
-DynamicText.prototype = new Template();
+DynamicText.prototype = Object.create(Template.prototype);
+DynamicText.prototype.constructor = DynamicText;
 DynamicText.prototype.get = function(context, unescaped) {
   var value = this.expression.get(context);
   if (value instanceof Template) {
@@ -202,10 +227,16 @@ DynamicText.prototype.get = function(context, unescaped) {
   var data = this.stringify(value);
   return (unescaped) ? data : escapeHtml(data);
 };
-DynamicText.prototype.appendTo = function(parent, context) {
+DynamicText.prototype.appendTo = function(parent, context, binding) {
   var value = this.expression.get(context);
   if (value instanceof Template) {
+    var start = document.createComment(this.expression);
+    var end = document.createComment('/' + this.expression);
+    var condition = this.getCondition(context);
+    parent.appendChild(start);
     value.appendTo(parent, context);
+    parent.appendChild(end);
+    updateRange(context, binding, this, start, end, null, condition);
     return;
   }
   var data = this.stringify(value);
@@ -216,13 +247,36 @@ DynamicText.prototype.appendTo = function(parent, context) {
 DynamicText.prototype.attachTo = function(parent, node, context) {
   var value = this.expression.get(context);
   if (value instanceof Template) {
-    return value.attachTo(parent, node, context);
+    var start = document.createComment(this.expression);
+    var end = document.createComment('/' + this.expression);
+    var condition = this.getCondition(context);
+    parent.insertBefore(start, node || null);
+    node = value.attachTo(parent, node, context);
+    parent.insertBefore(end, node || null);
+    updateRange(context, null, this, start, end, null, condition);
+    return node;
   }
   var data = this.stringify(value);
   return attachText(parent, node, data, this, context);
 };
 DynamicText.prototype.update = function(context, binding) {
-  binding.node.data = this.stringify(this.expression.get(context));
+  if (binding instanceof RangeBinding) {
+    this._blockUpdate(context, binding);
+    return;
+  }
+  var value = this.expression.get(context);
+  if (value instanceof Template) {
+    var start = binding.node;
+    if (!start.parentNode) return;
+    var end = start;
+    var fragment = this.getFragment(context);
+    replaceRange(context, start, end, fragment, binding);
+    return;
+  }
+  binding.node.data = this.stringify(value);
+};
+DynamicText.prototype.getCondition = function(context) {
+  return this.expression.get(context);
 };
 DynamicText.prototype.type = 'DynamicText';
 DynamicText.prototype.serialize = function() {
@@ -265,7 +319,8 @@ function Comment(data, hooks) {
   this.data = data;
   this.hooks = hooks;
 }
-Comment.prototype = new Template();
+Comment.prototype = Object.create(Template.prototype);
+Comment.prototype.constructor = Comment;
 Comment.prototype.get = function() {
   return '<!--' + this.data + '-->';
 };
@@ -286,7 +341,8 @@ function DynamicComment(expression, hooks) {
   this.expression = expression;
   this.hooks = hooks;
 }
-DynamicComment.prototype = new Template();
+DynamicComment.prototype = Object.create(Template.prototype);
+DynamicComment.prototype.constructor = DynamicComment;
 DynamicComment.prototype.get = function(context) {
   var value = getUnescapedValue(this.expression, context);
   var data = this.stringify(value);
@@ -340,7 +396,8 @@ function addNodeBinding(template, context, node) {
 function Html(data) {
   this.data = data;
 }
-Html.prototype = new Template();
+Html.prototype = Object.create(Template.prototype);
+Html.prototype.constructor = Html;
 Html.prototype.get = function() {
   return this.data;
 };
@@ -360,7 +417,8 @@ function DynamicHtml(expression) {
   this.expression = expression;
   this.ending = '/' + expression;
 }
-DynamicHtml.prototype = new Template();
+DynamicHtml.prototype = Object.create(Template.prototype);
+DynamicHtml.prototype.constructor = DynamicHtml;
 DynamicHtml.prototype.get = function(context) {
   var value = getUnescapedValue(this.expression, context);
   return this.stringify(value);
@@ -429,7 +487,8 @@ function Attribute(data, ns) {
   this.data = data;
   this.ns = ns;
 }
-Attribute.prototype = new Template();
+Attribute.prototype = Object.create(Template.prototype);
+Attribute.prototype.constructor = Attribute;
 Attribute.prototype.get = Attribute.prototype.getBound = function(context) {
   return this.data;
 };
@@ -444,7 +503,8 @@ function DynamicAttribute(expression, ns) {
   this.ns = ns;
   this.elementNs = null;
 }
-DynamicAttribute.prototype = new Attribute();
+DynamicAttribute.prototype = Object.create(Attribute.prototype);
+DynamicAttribute.prototype.constructor = DynamicAttribute;
 DynamicAttribute.prototype.get = function(context) {
   return getUnescapedValue(this.expression, context);
 };
@@ -458,12 +518,23 @@ DynamicAttribute.prototype.update = function(context, binding) {
   var element = binding.element;
   var propertyName = !this.elementNs && UPDATE_PROPERTIES[binding.name];
   if (propertyName) {
-    if (element.tagName === 'INPUT' && element.type === 'number' && propertyName === 'value') {
-      if (parseFloat(element.value) === value) return;
+    // Update via DOM property, short-circuiting if no update is needed.
+    // Certain properties must be strings, so for those properties, the value gets stringified.
+    //
+    // There is one special case, when updating the string `input.value` property with a number.
+    // If a user tries to type "1.01" in an `<input type="number">, then once they've typed "1.0",
+    // the context value is set to `1`, triggering this update function to set the input value to
+    // "1". That means typing "1.01" would be impossible without special handling to avoid
+    // overwriting an existing input value of "1.0" with a new value of "1".
+    if (element.tagName === 'INPUT' && propertyName === 'value' && typeof value === 'number') {
+      if (parseFloat(element.value) === value) {
+        return;
+      }
     }
-    if (propertyName === 'value') value = this.stringify(value);
-    if (element[propertyName] === value) return;
-    element[propertyName] = value;
+    var propertyValue = (STRING_PROPERTIES[binding.name]) ?
+      this.stringify(value) : value;
+    if (element[propertyName] === propertyValue) return;
+    element[propertyName] = propertyValue;
     return;
   }
   if (value === false || value == null) {
@@ -510,7 +581,8 @@ function Element(tagName, attributes, content, hooks, selfClosing, notClosed, ns
   this.unescapedContent = (lowerTagName === 'script' || lowerTagName === 'style');
   this.bindContentToValue = (lowerTagName === 'textarea');
 }
-Element.prototype = new Template();
+Element.prototype = Object.create(Template.prototype);
+Element.prototype.constructor = Element;
 Element.prototype.getTagName = function() {
   return this.tagName;
 };
@@ -623,7 +695,8 @@ function DynamicElement(tagName, attributes, content, hooks, selfClosing, notClo
   this.startClose = getStartClose(selfClosing);
   this.unescapedContent = false;
 }
-DynamicElement.prototype = new Element();
+DynamicElement.prototype = Object.create(Element.prototype);
+DynamicElement.prototype.constructor = DynamicElement;
 DynamicElement.prototype.getTagName = function(context) {
   return getUnescapedValue(this.tagName, context);
 };
@@ -661,7 +734,8 @@ function Block(expression, content) {
   this.ending = '/' + expression;
   this.content = content;
 }
-Block.prototype = new Template();
+Block.prototype = Object.create(Template.prototype);
+Block.prototype.constructor = Block;
 Block.prototype.get = function(context, unescaped) {
   var blockContext = context.child(this.expression);
   return contentHtml(this.content, blockContext, unescaped);
@@ -694,7 +768,8 @@ Block.prototype.serialize = function() {
 Block.prototype.update = function(context, binding) {
   if (!binding.start.parentNode) return;
   var condition = this.getCondition(context);
-  if (condition === binding.condition) return;
+  // Cancel update if prior condition is equivalent to current value
+  if (equalConditions(condition, binding.condition)) return;
   binding.condition = condition;
   // Get start and end in advance, since binding is mutated in getFragment
   var start = binding.start;
@@ -715,6 +790,7 @@ Block.prototype.getCondition = function(context) {
   var value = this.expression.get(context);
   return (typeof value === 'object') ? NaN : value;
 };
+DynamicText.prototype._blockUpdate = Block.prototype.update;
 
 function ConditionalBlock(expressions, contents) {
   this.expressions = expressions;
@@ -722,7 +798,8 @@ function ConditionalBlock(expressions, contents) {
   this.ending = '/' + this.beginning;
   this.contents = contents;
 }
-ConditionalBlock.prototype = new Block();
+ConditionalBlock.prototype = Object.create(Block.prototype);
+ConditionalBlock.prototype.constructor = ConditionalBlock;
 ConditionalBlock.prototype.get = function(context, unescaped) {
   var condition = this.getCondition(context);
   if (condition == null) return '';
@@ -764,7 +841,8 @@ ConditionalBlock.prototype.serialize = function() {
 ConditionalBlock.prototype.update = function(context, binding) {
   if (!binding.start.parentNode) return;
   var condition = this.getCondition(context);
-  if (condition === binding.condition) return;
+  // Cancel update if prior condition is equivalent to current value
+  if (equalConditions(condition, binding.condition)) return;
   binding.condition = condition;
   // Get start and end in advance, since binding is mutated in getFragment
   var start = binding.start;
@@ -786,7 +864,8 @@ function EachBlock(expression, content, elseContent) {
   this.content = content;
   this.elseContent = elseContent;
 }
-EachBlock.prototype = new Block();
+EachBlock.prototype = Object.create(Block.prototype);
+EachBlock.prototype.constructor = EachBlock;
 EachBlock.prototype.get = function(context, unescaped) {
   var items = this.expression.get(context);
   if (items && items.length) {
@@ -1017,11 +1096,12 @@ function replaceRange(context, start, end, fragment, binding, innerOnly) {
 }
 function emitRemoved(context, node, ignore) {
   context.removeNode(node);
-  emitRemovedBinding(context, ignore, node.$bindNode);
-  emitRemovedBinding(context, ignore, node.$bindStart);
-  emitRemovedBinding(context, ignore, node.$bindItemStart);
+  emitRemovedBinding(context, ignore, node, '$bindNode');
+  emitRemovedBinding(context, ignore, node, '$bindStart');
+  emitRemovedBinding(context, ignore, node, '$bindItemStart');
   var attributes = node.$bindAttributes;
   if (attributes) {
+    node.$bindAttributes = null;
     for (var key in attributes) {
       context.removeBinding(attributes[key]);
     }
@@ -1030,9 +1110,13 @@ function emitRemoved(context, node, ignore) {
     emitRemoved(context, node, ignore);
   }
 }
-function emitRemovedBinding(context, ignore, binding) {
-  if (binding && binding !== ignore) {
-    context.removeBinding(binding);
+function emitRemovedBinding(context, ignore, node, property) {
+  var binding = node[property];
+  if (binding) {
+    node[property] = null;
+    if (binding !== ignore) {
+      context.removeBinding(binding);
+    }
   }
 }
 
@@ -1071,7 +1155,8 @@ function NodeBinding(template, context, node) {
   this.meta = null;
   setNodeProperty(node, '$bindNode', this);
 }
-NodeBinding.prototype = new Binding();
+NodeBinding.prototype = Object.create(Binding.prototype);
+NodeBinding.prototype.constructor = NodeBinding;
 NodeBinding.prototype.type = 'NodeBinding';
 
 function AttributeBindingsMap() {}
@@ -1085,7 +1170,8 @@ function AttributeBinding(template, context, element, name) {
     (element.$bindAttributes = new AttributeBindingsMap());
   map[name] = this;
 }
-AttributeBinding.prototype = new Binding();
+AttributeBinding.prototype = Object.create(Binding.prototype);
+AttributeBinding.prototype.constructor = AttributeBinding;
 AttributeBinding.prototype.type = 'AttributeBinding';
 
 function RangeBinding(template, context, start, end, itemFor, condition) {
@@ -1098,7 +1184,8 @@ function RangeBinding(template, context, start, end, itemFor, condition) {
   this.meta = null;
   setNodeBounds(this, start, itemFor);
 }
-RangeBinding.prototype = new Binding();
+RangeBinding.prototype = Object.create(Binding.prototype);
+RangeBinding.prototype.constructor = RangeBinding;
 RangeBinding.prototype.type = 'RangeBinding';
 RangeBinding.prototype.insert = function(index, howMany) {
   this.context.pause();
@@ -1151,6 +1238,14 @@ function escapeAttribute(string) {
   return string.replace(/[&"]/g, function(match) {
     return (match === '&') ? '&amp;' : '&quot;';
   });
+}
+
+function equalConditions(a, b) {
+  // First, test for strict equality
+  if (a === b) return true;
+  // Failing that, allow for template objects used as a condition to define a
+  // custom `equals()` method to indicate equivalence
+  return (a instanceof Template) && a.equals(b);
 }
 
 

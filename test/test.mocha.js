@@ -1,8 +1,7 @@
-if ((typeof require) === 'function') {
-  var expect = require('expect.js');
-  var saddle = require('../index');
-  var expressions = require('../example/expressions');
-}
+var chai = require('chai');
+var expect = chai.expect;
+var saddle = require('../index');
+var expressions = require('../example/expressions');
 
 //add fixture to page
 //only 90s kids will remember this
@@ -21,6 +20,7 @@ describe('Static rendering', function() {
 
   describe('Fragment', function() {
     testStaticRendering(function test(options) {
+      // getFragment calls appendTo, so these Fragment tests cover appendTo.
       var fragment = options.template.getFragment(context);
       options.fragment(fragment);
     });
@@ -116,6 +116,50 @@ function testStaticRendering(test) {
         expect(fragment.childNodes[0].tagName.toLowerCase()).equal('input');
         expect(fragment.childNodes[0].getAttribute('autofocus')).eql(null);
       }
+    });
+  });
+
+  describe('title attribute', function() {
+    it('renders string value', function() {
+      test({
+        template: new saddle.Element('div', {
+          title: new saddle.Attribute('My tooltip')
+        })
+      , html: '<div title="My tooltip"></div>'
+      , fragment: function(fragment) {
+          expect(fragment.childNodes.length).equal(1);
+          expect(fragment.childNodes[0].tagName.toLowerCase()).equal('div');
+          expect(fragment.childNodes[0].getAttribute('title')).eql('My tooltip');
+        }
+      });
+    });
+
+    it('renders numeric value as a string', function() {
+      test({
+        template: new saddle.Element('div', {
+          title: new saddle.Attribute(123)
+        })
+      , html: '<div title="123"></div>'
+      , fragment: function(fragment) {
+          expect(fragment.childNodes.length).equal(1);
+          expect(fragment.childNodes[0].tagName.toLowerCase()).equal('div');
+          expect(fragment.childNodes[0].getAttribute('title')).eql('123');
+        }
+      });
+    });
+
+    it('does not render undefined value', function() {
+      test({
+        template: new saddle.Element('div', {
+          title: new saddle.Attribute(undefined)
+        })
+      , html: '<div></div>'
+      , fragment: function(fragment) {
+          expect(fragment.childNodes.length).equal(1);
+          expect(fragment.childNodes[0].tagName.toLowerCase()).equal('div');
+          expect(fragment.childNodes[0].hasAttribute('title')).eql(false);
+        }
+      });
     });
   });
 
@@ -448,7 +492,7 @@ describe('attachTo', function() {
     ]);
     expect(function() {
       renderAndAttach(template);
-    }).to.throwException();
+    }).throw(Error);
   });
 
 });
@@ -515,6 +559,74 @@ function testBindingUpdates(render) {
     expect(getText(fixture)).equal('onetwo');
   });
 
+  it('updates a TextNode that returns text, then a Template', function() {
+    var template = new saddle.Template([
+      new saddle.DynamicText(new expressions.Expression('dynamicTemplate'))
+    ]);
+    var data = {dynamicTemplate: 'Hola'};
+    var binding = render(template, data).pop();
+    expect(getText(fixture)).equal('Hola');
+    binding.context = getContext({
+      dynamicTemplate: new saddle.DynamicText(new expressions.Expression('text'))
+    , text: 'Yo'
+    });
+    binding.update();
+    expect(getText(fixture)).equal('Yo');
+  });
+
+  it('updates a TextNode that returns a Template, then text', function() {
+    var template = new saddle.Template([
+      new saddle.DynamicText(new expressions.Expression('dynamicTemplate'))
+    ]);
+    var data = {
+      dynamicTemplate: new saddle.DynamicText(new expressions.Expression('text'))
+    , text: 'Yo'
+    };
+    var binding = render(template, data).pop();
+    expect(getText(fixture)).equal('Yo');
+    binding.context = getContext({dynamicTemplate: 'Hola'});
+    binding.update();
+    expect(getText(fixture)).equal('Hola');
+  });
+
+  it('updates a TextNode that returns a Template, then another Template', function() {
+    var template = new saddle.Template([
+      new saddle.DynamicText(new expressions.Expression('dynamicTemplate'))
+    ]);
+    var data = {
+      dynamicTemplate: new saddle.DynamicText(new expressions.Expression('text'))
+    , text: 'Yo'
+    };
+    var binding = render(template, data).pop();
+    expect(getText(fixture)).equal('Yo');
+    binding.context = getContext({
+      dynamicTemplate: new saddle.Template([
+        new saddle.DynamicText(new expressions.Expression('first'))
+      , new saddle.DynamicText(new expressions.Expression('second'))
+      ])
+    , first: 'one'
+    , second: 'two'
+    });
+    binding.update();
+    expect(getText(fixture)).equal('onetwo');
+  });
+
+  it('updates within a template returned by a TextNode', function() {
+    var template = new saddle.Template([
+      new saddle.DynamicText(new expressions.Expression('dynamicTemplate'))
+    ]);
+    var data = {
+      dynamicTemplate: new saddle.DynamicText(new expressions.Expression('text'))
+    , text: 'Yo'
+    };
+    var textBinding = render(template, data).shift();
+    expect(getText(fixture)).equal('Yo');
+    data.text = 'Hola';
+    textBinding.context = getContext(data);
+    textBinding.update();
+    expect(getText(fixture)).equal('Hola');
+  });
+
   it('updates a CommentNode', function() {
     var template = new saddle.Template([
       new saddle.DynamicComment(new expressions.Expression('comment'))
@@ -577,6 +689,77 @@ function testBindingUpdates(render) {
     expect(node.getAttribute('data-greeting')).eql(null);
     // Dynamic updates don't affect static attribute
     expect(node.className).equal('message');
+  });
+
+  it('updates text input "value" property', function() {
+    var template = new saddle.Template([
+      new saddle.Element('input', {
+        'value': new saddle.DynamicAttribute(new expressions.Expression('text')),
+      })
+    ]);
+
+    var binding = render(template).pop();
+    var input = fixture.firstChild;
+
+    // Set initial value to string.
+    binding.context = getContext({text: 'Hi'});
+    binding.update();
+    expect(input.value).equal('Hi');
+
+    // Update using numeric value, check that title is the stringified number.
+    binding.context = getContext({text: 123});
+    binding.update();
+    expect(input.value).equal('123');
+
+    // Change value to undefined, make sure attribute is removed.
+    binding.context = getContext({});
+    binding.update();
+    expect(input.value).equal('');
+  });
+
+  it('does not clobber input type="number" value when typing "1.0"', function() {
+    var template = new saddle.Template([
+      new saddle.Element('input', {
+        'type': new saddle.Attribute('number'),
+        'value': new saddle.DynamicAttribute(new expressions.Expression('amount')),
+      })
+    ]);
+
+    var binding = render(template).pop();
+    var input = fixture.firstChild;
+
+    // Make sure that a user-typed input value of "1.0" does not get clobbered by
+    // a context value of `1`.
+    input.value = '1.0';
+    binding.context = getContext({amount: 1});
+    binding.update();
+    expect(input.value).equal('1.0');
+  });
+
+  it('updates "title" attribute', function() {
+    var template = new saddle.Template([
+      new saddle.Element('div', {
+        'title': new saddle.DynamicAttribute(new expressions.Expression('divTooltip')),
+      })
+    ]);
+
+    var binding = render(template).pop();
+    var node = fixture.firstChild;
+
+    // Set initial value to string.
+    binding.context = getContext({divTooltip: 'My tooltip'});
+    binding.update();
+    expect(node.title).equal('My tooltip');
+
+    // Update using numeric value, check that title is the stringified number.
+    binding.context = getContext({divTooltip: 123});
+    binding.update();
+    expect(node.title).equal('123');
+
+    // Change value to undefined, make sure attribute is removed.
+    binding.context = getContext({});
+    binding.update();
+    expect(node.title).equal('');
   });
 
   it('updates a Block', function() {

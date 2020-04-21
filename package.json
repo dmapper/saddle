@@ -6,17 +6,19 @@
     "type": "git",
     "url": "git+https://github.com/derbyjs/saddle.git"
   },
-  "version": "0.7.3",
+  "version": "0.9.6",
   "main": "./lib/index.js",
   "scripts": {
-    "test": "mocha --recursive test --bail --colors --reporter spec --debug"
+    "test": "mocha test/serialize.mocha.js --bail --colors --reporter spec; node test/testServer.js"
   },
   "dependencies": {
     "serialize-object": "^1.0.0"
   },
   "devDependencies": {
-    "mocha": "~1.9.0",
-    "expect.js": "~0.2.0"
+    "browserify": "^16.5.0",
+    "chai": "^4.2.0",
+    "express": "^4.17.1",
+    "mocha": "^6.2.2"
   },
   "optionalDependencies": {},
   "testling": {
